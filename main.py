@@ -52,25 +52,38 @@ SARS LETTER:
     return response.choices[0].message.content
 @app.post("/analyze-letter")
 def analyze_letter(payload: dict):
-    file_url = payload.get("file_url")
+    try:
+        file_url = payload.get("file_url")
+        if not file_url:
+            return {"error": "No file_url provided"}
 
-    if not file_url:
-        return {"error": "No file URL provided"}
+        response = requests.get(file_url)
+        file_bytes = response.content
+        content_type = response.headers.get("Content-Type", "")
 
-    # Download the file
-    response = requests.get(file_url)
-    file_bytes = response.content
-    content_type = response.headers.get("Content-Type", "")
+        # Only allow PDFs for now (IMPORTANT)
+        if "pdf" not in content_type.lower():
+            return {
+                "result": "This file does not appear to be a PDF. Please upload a PDF SARS letter."
+            }
 
-    # Extract text
-    letter_text = extract_text_from_file(file_bytes, content_type)
+        text = ""
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
 
-    if not letter_text.strip():
-        return {"result": "Could not read the letter clearly."}
+        if not text.strip():
+            return {
+                "result": "We could not read any text from this PDF. It may be a scanned image."
+            }
 
-    # Explain using AI
-    explanation = explain_letter(letter_text)
+        explanation = explain_letter(text)
 
-    return {
-        "result": explanation
-    }
+        return {"result": explanation}
+
+    except Exception as e:
+        return {
+            "result": "An internal error occurred while processing the letter.",
+            "debug": str(e)
+        }
+
