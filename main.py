@@ -1,45 +1,45 @@
 from fastapi import FastAPI
 import requests
 import io
+import os
 
 import pdfplumber
-from PIL import Image
-import pytesseract
-
 from openai import OpenAI
 
 app = FastAPI()
 
-import os
+# Initialise OpenAI client using environment variable
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-def extract_text_from_file(file_bytes, content_type):
-    # If it's a PDF
-    if "pdf" in content_type:
-        text = ""
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
-        return text
 
-    # Otherwise, treat as image
-    image = Image.open(io.BytesIO(file_bytes))
-    return pytesseract.image_to_string(image)
-def explain_letter(letter_text):
+
+def explain_letter(letter_text: str) -> str:
+    """
+    Sends the extracted SARS letter text to OpenAI
+    and returns a plain-English explanation.
+    """
+
     prompt = f"""
-You are a South African tax assistant.
+You are a South African tax letter explanation assistant.
 
-Explain the following SARS letter in plain English.
-Do NOT give tax advice.
+IMPORTANT RULES:
+- You must ONLY use the text provided below.
+- If the letter text is incomplete, unclear, or missing, you MUST say so.
+- DO NOT guess the letter type.
+- DO NOT provide generic SARS explanations.
+- DO NOT hallucinate content.
 
-Include:
-- Letter type
-- What it means
-- What SARS wants
-- Deadlines
-- Consequences
-- Safe next steps
+Your task:
+1. Identify the SARS letter type ONLY if clearly stated.
+2. Explain the letter in plain English.
+3. List exactly what SARS is requesting.
+4. Extract any deadlines explicitly mentioned.
+5. Explain consequences ONLY if stated in the letter.
+6. Provide safe next steps without giving tax advice.
 
-SARS LETTER:
+If the letter content is insufficient, respond with:
+"The letter text provided is incomplete or unreadable, so a reliable explanation cannot be given."
+
+LETTER TEXT:
 {letter_text}
 """
 
@@ -50,40 +50,63 @@ SARS LETTER:
     )
 
     return response.choices[0].message.content
+
+
 @app.post("/analyze-letter")
 def analyze_letter(payload: dict):
+    """
+    Receives a file URL from ManyChat, downloads the PDF,
+    extracts text, and returns a plain-English explanation.
+    """
+
     try:
         file_url = payload.get("file_url")
         if not file_url:
-            return {"error": "No file_url provided"}
+            return {"result": "No file was provided."}
 
-        response = requests.get(file_url)
+        # Download the file
+        response = requests.get(file_url, timeout=20)
         file_bytes = response.content
-        content_type = response.headers.get("Content-Type", "")
+        content_type = response.headers.get("Content-Type", "").lower()
 
-        # Only allow PDFs for now (IMPORTANT)
-        if "pdf" not in content_type.lower():
+        # Only allow PDFs for v1 (important for stability)
+        if "pdf" not in content_type:
             return {
-                "result": "This file does not appear to be a PDF. Please upload a PDF SARS letter."
+                "result": (
+                    "This file does not appear to be a PDF.\n\n"
+                    "Please upload a text-based SARS PDF letter."
+                )
             }
 
-        text = ""
+        # Extract text from PDF
+        extracted_text = ""
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for page in pdf.pages:
-                text += page.extract_text() or ""
+                extracted_text += page.extract_text() or ""
 
-        if not text.strip():
+        # Minimum text check (prevents AI guessing)
+        if not extracted_text or len(extracted_text.strip()) < 200:
             return {
-                "result": "We could not read any text from this PDF. It may be a scanned image."
+                "result": (
+                    "We couldn’t reliably read the text from this letter.\n\n"
+                    "This usually means:\n"
+                    "• The PDF is a scanned image\n"
+                    "• The text is not machine-readable\n\n"
+                    "Please upload a text-based SARS PDF or a clearer version."
+                )
             }
 
-        explanation = explain_letter(text)
+        # Explain the letter using AI
+        explanation = explain_letter(extracted_text)
 
         return {"result": explanation}
 
     except Exception as e:
+        # Fail safely — never crash or expose stack traces to users
         return {
-            "result": "An internal error occurred while processing the letter.",
+            "result": (
+                "An internal error occurred while processing the letter. "
+                "Please try again later."
+            ),
             "debug": str(e)
         }
-
